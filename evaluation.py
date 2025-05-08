@@ -220,7 +220,9 @@ def evaluate_addition_precomputed(config, model, ctx, decode, batch_list, total,
     accuracy_dictionary = {}
     if analyze:
         error_df = pd.DataFrame(error_dict)
-        result_dir = config.get('result_dir', get_results_dir(config))
+        result_dir = config.get('result_dir')
+        if result_dir is None:
+            result_dir = get_results_dir(config)
         error_df.to_csv(os.path.join(result_dir, 'error_df.csv'), index=False)
 
         error_mean_dict = {
