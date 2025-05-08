@@ -474,9 +474,6 @@ checkpoint = {
 }
 torch.save(checkpoint, os.path.join(out_dir, f'ckpt_final.pt'))
 
-if wandb_log:
-    wandb.finish()
-
 
 losses = estimate_loss()
 
@@ -501,6 +498,7 @@ if eval_addition_train:
                 decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c,
                                                     data_type=data_type, operator=operator, data_format=data_format)
+
 if wandb_log:
   wandb_dict = {
       "iter": iter_num,
@@ -510,6 +508,7 @@ if wandb_log:
       "test/accuracy": test_accuracy if eval_addition else None,
   }
   wandb.log(wandb_dict)
+
 result_dict['iter'].append(iter_num)
 result_dict['train_loss'].append(losses['train'].item())
 result_dict['val_loss'].append(losses['val'].item())
