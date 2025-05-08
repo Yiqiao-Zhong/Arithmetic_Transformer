@@ -1,5 +1,5 @@
 from main_utilities import *
-import tqdm
+from tqdm.auto import tqdm
 import torch
 import numpy as np
 import random

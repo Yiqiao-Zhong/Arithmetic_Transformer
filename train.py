@@ -46,7 +46,10 @@ def encode_addition(text, meta):
 
 def decode_addition(tensor, meta):
     """Decode tensor to text using the metadata."""
-    return ''.join([meta['itos'][i.item()] for i in tensor])
+    if isinstance(tensor, torch.Tensor):
+        return ''.join([meta['itos'][i.item()] for i in tensor])
+    else:
+        return ''.join([meta['itos'][i] for i in tensor])
 
 class AdditionDataset(Dataset):
     def __init__(self, file_path, meta):
