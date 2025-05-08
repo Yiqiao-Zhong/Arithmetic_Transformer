@@ -429,7 +429,7 @@ while iter_num < max_iters:
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c,
                                                     data_type=data_type, operator=operator, data_format=data_format, analyze=True)
             
-            if test_accuracy > best_accuracy:
+            if test_accuracy > best_accuracy and iter_num % 5 * eval_interval == 0:
                 best_accuracy = test_accuracy
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -538,9 +538,6 @@ checkpoint = {
     'best_accuracy': best_accuracy,
     'config': config,
 }
-ckpt_path_name = f'ckpt_iter_{iter_num}.pt'
-print(f"saving checkpoint to {out_dir}/{ckpt_path_name}")
-torch.save(checkpoint, os.path.join(out_dir, ckpt_path_name))
 
 if wandb_log:
     wandb.finish()
