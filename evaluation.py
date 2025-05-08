@@ -152,27 +152,39 @@ def evaluate_addition_precomputed(config, model, ctx, decode, batch_list, total,
 
                 for i, outcome in enumerate(outcome_list):
                     _, len_x, line_start, operands, result = batch[i]
+                    print(f"\nDebug - Full outcome: {outcome}")
+                    print(f"Debug - Input length (len_x): {len_x}")
+                    print(f"Debug - Raw generated tokens: {outcome[len_x:]}")
+                    
+                    # The model will never generate more than max_new_tokens
                     c_hat = outcome[len_x:]
+                    print(f"Debug - After len_x slice: {c_hat}")
 
                     # Process the output to get the actual prediction
                     if '$' == line_start:  # handle $ prompt $
                         c_hat = c_hat.split('$')[0]
+                        print(f"Debug - After $ split: {c_hat}")
                     else:
                         if '\n' == c_hat[-1]:  # handle cases where it ends with '\n'
                             c_hat = c_hat[:-1]
+                            print(f"Debug - After newline removal: {c_hat}")
 
                     c_hat2 = c_hat
                     if zero_pad:
                         c_hat2 = remove_zero_pad(c_hat)
+                        print(f"Debug - After zero pad removal: {c_hat2}")
 
                     # plain addition
                     c_hat2 = c_hat2.split('\n')[0]
+                    print(f"Debug - After newline split: {c_hat2}")
 
                     if reverse_c:
                         c_hat2 = reverse_string(c_hat2)
+                        print(f"Debug - After reverse: {c_hat2}")
 
                     if add_space:
                         c_hat2 = c_hat2.replace(' ', '')
+                        print(f"Debug - After space removal: {c_hat2}")
 
                     if is_number(c_hat2):
                         if '.' in c_hat2:
