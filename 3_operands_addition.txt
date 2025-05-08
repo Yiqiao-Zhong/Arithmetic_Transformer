@@ -26,6 +26,7 @@ eval_addition_train = False
 start_train = "FILE:/content/drive/MyDrive/addition/data/train_test_additionOperations_4_numOfChars_4_numOfSamples_100.txt"
 analysis = False
 num_addition = 3
+num_digit = 1
 
 # ===== Learning Rate Policy ===== #
 learning_rate = 1e-3
@@ -42,7 +43,7 @@ out_dir = '/content/drive/MyDrive/addition/reverse_3_addition_500/out'
 
 init_from = 'scratch'
 
-train_data_path = '/content/drive/MyDrive/addition/addition_3_operands/3_addition_500_train.txt'
-val_data_path = '/content/drive/MyDrive/addition/addition_3_operands/3_addition_50_val.txt'
+train_data_path = '/content/drive/MyDrive/addition/addition_3_operands/reverse_3_addition_500_train.txt'
+val_data_path = '/content/drive/MyDrive/addition/addition_3_operands/reverse_3_addition_50_val.txt'
 
 max_new_tokens = 3
