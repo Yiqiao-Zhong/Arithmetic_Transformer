@@ -420,12 +420,10 @@ while iter_num < max_iters:
             best_val_loss = losses['val']
         if eval_addition:
             config['start'] = start
-            test_accuracy, *_ = evaluate_addition_batch(config, model, ctx, 
-                encode=lambda x: encode_addition(x, meta),
-                decode=lambda x: decode_addition(x, meta),
-                num_digit=num_digit, zero_pad=zero_pad,
-                reverse_ab=reverse_ab, reverse_c=reverse_c,
-                data_type=data_type, operator=operator, data_format=data_format)
+            test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
+                                                    reverse_ab=reverse_ab, reverse_c=reverse_c,
+                                                    data_type=data_type, operator=operator, data_format=data_format, analyze=True)
             
             if test_accuracy > best_accuracy:
                 best_accuracy = test_accuracy
@@ -484,12 +482,23 @@ if eval_addition:
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c,
                                                     data_type=data_type, operator=operator, data_format=data_format, analyze=True)
   import csv
+  # Save correct examples
   correct_path = os.path.join(result_dir, 'correct_examples.csv')
   with open(correct_path, 'w', newline='') as csvfile:
     fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
     for i, nums in enumerate(correct):
+        operands, result, outcome, c_hat2 = nums
+        writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
+  
+  # Save incorrect examples
+  incorrect_path = os.path.join(result_dir, 'incorrect_examples.csv')
+  with open(incorrect_path, 'w', newline='') as csvfile:
+    fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    for i, nums in enumerate(incorrect):
         operands, result, outcome, c_hat2 = nums
         writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
 if eval_addition_train:
