@@ -13,8 +13,6 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data import Dataset, DataLoader
 import wandb
 import torch.nn.functional as F
@@ -24,19 +22,51 @@ from model import GPTConfig, GPT
 from main_utilities import *
 from evaluation import *
 
+def create_meta_for_addition(data):
+    """Create metadata for addition data."""
+    # Define the vocabulary for addition problems
+    # This includes digits, operators, equals sign, and newline
+    chars = sorted(list(set(data)))
+    vocab_size = len(chars)
+    # Create encoder and decoder dictionaries
+    stoi = {ch: i for i, ch in enumerate(chars)}
+    itos = {i: ch for i, ch in enumerate(chars)}
+    
+    meta = {
+        'vocab_size': vocab_size,
+        'vocab': chars,
+        'stoi': stoi,
+        'itos': itos
+    }
+    return meta
+
+def encode_addition(text, meta):
+    """Encode text to tensor using the metadata."""
+    return torch.tensor([meta['stoi'][c] for c in text], dtype=torch.long)
+
+def decode_addition(tensor, meta):
+    """Decode tensor to text using the metadata."""
+    return ''.join([meta['itos'][i.item()] for i in tensor])
 
 class AdditionDataset(Dataset):
-    def __init__(self, data, block_size):
-        self.data = data
-        self.block_size = block_size
-
+    def __init__(self, file_path, meta):
+        self.meta = meta
+        # Read the text file
+        with open(file_path, 'r') as f:
+            self.lines = f.readlines()
+        # Remove any empty lines and strip whitespace
+        self.lines = [line.strip() for line in self.lines if line.strip()]
+        
     def __len__(self):
-        return len(self.data) - self.block_size - 1
-
+        return len(self.lines)
+    
     def __getitem__(self, idx):
-        x = torch.from_numpy((self.data[idx:idx+self.block_size]).astype(np.int64))
-        y = torch.from_numpy((self.data[idx+1:idx+1+self.block_size]).astype(np.int64))
+        line = self.lines[idx]
+        # Convert the line to tensor using our encoder
+        x = encode_addition(line[:-1], self.meta)  # all but last char
+        y = encode_addition(line[1:], self.meta)   # all but first char
         return x, y
+
 # I/O
 
 out_dir = '/drive/MyDrive/addition/plain_no_pad/out'
@@ -91,12 +121,14 @@ reverse_c = False
 zero_pad = False
 algo_reason = False
 add_space = False
+analysis = False
+num_addition = 4
 
 # model
 n_layer = 6
 n_head = 6
-n_embd = 384
-dropout = 0.2 # for pretraining 0 is good, for finetuning try 0.1+
+n_embd = 768
+dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 ckpt_path_name = 'ckpt.pt'
 save_final = True
@@ -175,55 +207,17 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-if data_type == 'binary':
-  data_dir = os.path.join('data', dataset)
-  train_data = np.memmap(os.path.join(data_dir, train_data_path), dtype=np.uint16, mode='r')
-  val_data = np.memmap(os.path.join(data_dir, val_data_path), dtype=np.uint16, mode='r')
-  if train_both:
-      train_data2 = np.memmap(os.path.join(data_dir, train_data_path2), dtype=np.uint16, mode='r')
-      val_data2 = np.memmap(os.path.join(data_dir, val_data_path2), dtype=np.uint16, mode='r')
-  if eval_text:
-      if eval_text_data_path is None:
-          print('eval_text_data_path is None!!! No binary file to evaluate perplexity on.')
-      eval_text_data = np.memmap(eval_text_data_path, dtype=np.uint16, mode='r')
-  # test_data_str = None # test_data for addition testing will be handled with "start"
-  meta_path = None
-else:
-    if data_type == 'text':
-      if ('reverse' in data_format and not reverse_c) or (reverse_c and 'reverse' not in data_format):
-          raise ValueError('reverse_c must be True for data_format == "reverse"')
-      elif (data_format == 'algo_reasoning' and not algo_reason) or (algo_reason and data_format != 'algo_reasoning'):
-          raise ValueError('algo_reason must be True for data_format == "algo_reasoning"')
+# Read the data files
+with open(train_data_path, 'r') as f:
+    train_data = f.read()
+with open(val_data_path, 'r') as f:
+    val_data = f.read()
 
-    meta_path_specified = False
-
-    data_dir = os.path.join('data', dataset)
-    train_data_path = os.path.join(data_dir, train_data_path)
-    # val_data = os.path.join(data_dir, val_data_path)
-    train_data_list = get_data_list(train_data_path, operator=operator)
-    val_data_list = get_data_list(filename=None, operator=operator) # get_data_list(val_data, operator='+')
-    train_data_str = generate_data_str(train_data_list, operator=operator, format=data_format, train=True, shuffle=data_shuffle, add_space=add_space, simple=simple, random_A=random_A, random_C=random_C)
-    val_data_str = generate_data_str(val_data_list, operator=operator, format=data_format, train=True, shuffle=data_shuffle, add_space=add_space, simple=simple, random_A=random_A, random_C=random_C)
-    meta, meta_path, data_encoder, data_decoder = create_meta_file(vocabulary=vocabulary, input_data_str=train_data_str, tokenizer=tokenizer)
-    meta_vocab_size = meta['vocab_size']
-    train_data = data_encoder(train_data_str)
-    val_data = data_encoder(val_data_str)
-    if eval_addition_train and start_train is None:
-        # specify the start_train to be oour train data file
-        start_train = f"FILE:{train_data_path}"
-
-    if train_both:
-        # This is for the case where we use two different datasets for training
-        # we sample from both with a specified ratio - data_ratio
-        # TODO: let's leave this here for now.
-        train_data2 = np.memmap(os.path.join(data_dir, train_data_path2), dtype=np.uint16, mode='r')
-        val_data2 = np.memmap(os.path.join(data_dir, val_data_path2), dtype=np.uint16, mode='r')
-
-    if eval_text:
-        # eval_text_data = np.memmap(eval_text_data_path, dtype=np.uint16, mode='r')
-        text_data_list = get_data_list(eval_text_data_path, operator='text')
-        text_data_str = generate_data_str(text_data_list, operator='text', format=data_format, train=False, shuffle=False)
-        eval_text_data = data_encoder(text_data_str)
+# Create metadata from the combined data
+all_data = train_data + val_data
+meta = create_meta_for_addition(train_data)
+meta_vocab_size = meta['vocab_size']
+print(f"Using vocabulary size: {meta_vocab_size}")
 
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -232,18 +226,6 @@ best_val_loss = 1e9
 best_perplexity = 1e9 # on text data
 best_accuracy = -1 # on addition data
 
-
-if meta_path_specified:
-    # attempt to derive vocab_size from the dataset
-    meta_path = os.path.join(data_dir, 'meta.pkl')
-    meta_vocab_size = None
-    if os.path.exists(meta_path):
-        with open(meta_path, 'rb') as f:
-            meta = pickle.load(f)
-        meta_vocab_size = meta['vocab_size']
-        print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
-    else:
-        meta_path = None
 
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout, use_flash=use_flash) # start with model_args from command line
@@ -291,10 +273,6 @@ elif init_from == 'resume':
     if 'best_accuracy' in checkpoint.keys():
         best_accuracy = checkpoint['best_accuracy']
 
-# if block_size < model.config.block_size:
-#     model.crop_block_size(block_size)
-#     model_args['block_size'] = block_size # so that the checkpoint will have the right value
-# initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -332,28 +310,18 @@ def estimate_loss():
     model.train()
     return out
 
-def get_lr_for_epoch(epoch):
-    """
-    Calculate learning rate based on epoch number using cosine decay with warmup.
 
-    Args:
-        epoch (int): Current epoch number (0-indexed)
-        config (dict): Configuration containing learning rate parameters
-
-    Returns:
-        float: Learning rate for the current epoch
-    """
-
-
-    if epoch < warmup_epochs:
-        return learning_rate * (epoch + 1) / warmup_epochs
-
-    if epoch >= lr_decay_epochs:
+def get_lr_for_iter(iter_num):
+    """Calculate learning rate based on iteration number using cosine decay with warmup."""
+    if iter_num < warmup_iters:
+        return learning_rate * (iter_num + 1) / warmup_iters
+    
+    if iter_num >= lr_decay_iters:
         return min_lr
-
-    decay_ratio = (epoch - warmup_epochs) / (lr_decay_epochs - warmup_epochs)
+    
+    decay_ratio = (iter_num - warmup_iters) / (lr_decay_iters - warmup_iters)
     assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
 
 # logging
@@ -364,29 +332,25 @@ if wandb_log and master_process:
 
 
 
-train_dataset = AdditionDataset(train_data, block_size)
+train_dataset = AdditionDataset(train_data_path, meta)
 train_loader = DataLoader(
     train_dataset,
     batch_size=batch_size,
-    shuffle=True,  # This replaces the random sampling in get_batch
+    shuffle=True,
     pin_memory=(device_type=='cuda')
 )
 
-val_dataset = AdditionDataset(val_data, block_size)
+val_dataset = AdditionDataset(val_data_path, meta)
 val_loader = DataLoader(
     val_dataset,
     batch_size=batch_size,
-    shuffle=True,  # This replaces the random sampling in get_batch
+    shuffle=True,
     pin_memory=(device_type=='cuda')
 )
 
-encode, decode = get_encode_decode(meta_path, tokenizer=tokenizer)
+# encode, decode = get_encode_decode(meta_path, tokenizer=tokenizer)
 
-result_dict = {'epoch': [], 'iter' : [], 'train_loss': [], 'val_loss': [], 'test_acc': [], 'train_acc': []}
-if multi_digit:
-    digit_accuracy_dictionary = {}
-    for digit in range(1, num_digit+1):
-        digit_accuracy_dictionary[f"digit_{digit}"] = []
+result_dict = {'iter' : [], 'train_loss': [], 'val_loss': [], 'test_acc': []}
 
 result_dir = get_results_dir(config)
 config['result_dir'] = result_dir
@@ -400,149 +364,168 @@ raw_model = model
 running_mfu = -1.0
 iter_num = 0
 
-eval_epoch = config.get('eval_epoch', 4)
 max_iters = config.get('max_iters', 10000)
-max_epochs = config.get('max_epochs', 14)
-lr_decay_epochs = config.get('lr_decay_epochs', max_epochs)  # number of epochs to decay learning rate
-warmup_epochs = config.get('warmup_epochs', 2)  # number of epochs to warm up learning rate
+ # number of epochs to warm up learning rate
 
+# Initialize tracking variables
+iter_num = 0
+best_val_loss = 1e9
+best_accuracy = -1
+running_mfu = -1.0
 
+# Create infinite data loader
+def get_infinite_dataloader(dataloader):
+    while True:
+        for batch in dataloader:
+            yield batch
 
-for epoch in range(max_epochs):
-  model.train()
+train_loader_iter = get_infinite_dataloader(train_loader)
 
-  if decay_lr:
-    lr = get_lr_for_epoch(epoch)
-  else:
-    lr = learning_rate
-  epoch_loss = 0
-  samples_processed = 0
-  if epoch % eval_epoch == 0:
-    losses = estimate_loss()
-    if eval_addition:
-      config['start'] = start
-      test_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, num_digit=num_digit, zero_pad=zero_pad,
-                                                        reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
-                                                        binary=binary, data_type = data_type, operator=operator, data_format=data_format)
-    if eval_addition_train:
-        config['start'] = start_train
-        train_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, num_digit=num_digit, zero_pad=zero_pad,
-                                                        reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
-                                                        binary=binary, data_type=data_type, operator=operator, data_format=data_format)
-    if wandb_log:
-      wandb_dict = {
-          "epoch": epoch,
-          "train/loss": losses['train'],
-          "val/loss": losses['val'],
-          "lr": lr,
-          "mfu": running_mfu*100, # convert to percentage,
-          "test/accuracy": test_accuracy if eval_addition else None,
-          "train/accuracy": train_accuracy if eval_addition_train else None
-      }
-      wandb.log(wandb_dict)
-    result_dict['epoch'].append(epoch)
-    result_dict['iter'].append(iter_num)
-    result_dict['train_loss'].append(losses['train'].item())
-    result_dict['val_loss'].append(losses['val'].item())
-    result_dict['test_acc'].append(test_accuracy if eval_addition else None)
-    result_dict['train_acc'].append(train_accuracy if eval_addition_train else None)
-    result_df = pd.DataFrame(result_dict)
-    result_df.to_csv(os.path.join(result_dir, 'result.csv'), index=False)
-    checkpoint = {
+# Training loop - iteration based
+while iter_num < max_iters:
+    model.train()
+    
+    # Get learning rate for current iteration
+    if decay_lr:
+        lr = get_lr_for_iter(iter_num)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+    
+    # Get next batch
+    X, Y = next(train_loader_iter)
+    X, Y = X.to(device), Y.to(device)
+    
+    # Forward pass
+    with ctx:
+        logits, loss = model(X, Y)
+    
+    # Backward pass
+    scaler.scale(loss).backward()
+    if grad_clip != 0.0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+    scaler.step(optimizer)
+    scaler.update()
+    optimizer.zero_grad(set_to_none=True)
+    
+    
+    # Evaluation
+    if iter_num % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"iter {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+        if eval_addition:
+            config['start'] = start
+            test_accuracy, *_ = evaluate_addition_batch(config, model, ctx, 
+                encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta),
+                num_digit=num_digit, zero_pad=zero_pad,
+                reverse_ab=reverse_ab, reverse_c=reverse_c,
+                binary=binary, data_type=data_type, operator=operator, data_format=data_format)
+            
+            if test_accuracy > best_accuracy:
+                best_accuracy = test_accuracy
+                checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
                     'best_val_loss': best_val_loss,
-                    'best_perplexity': best_perplexity,
                     'best_accuracy': best_accuracy,
                     'config': config,
+                    'meta': meta,
                 }
-    ckpt_path_name = f'ckpt_epoch_{epoch}.pt'
-    print(f"saving checkpoint to {out_dir}/{ckpt_path_name}")
-    torch.save(checkpoint, os.path.join(out_dir, ckpt_path_name))
-
-    if eval_addition and test_accuracy > best_accuracy:
-          best_accuracy = test_accuracy
-          checkpoint['best_accuracy'] = best_accuracy
-          if iter_num > 0:
-              print(f"saving checkpoint to {out_dir}/{ckpt_path_name}")
-              torch.save(checkpoint, os.path.join(out_dir, ckpt_path_name.split('.pt')[0]+'_acc.pt'))
-  for batch_idx, (X, Y) in enumerate(train_loader):
-    X, Y = X.to(device), Y.to(device)
-    with ctx:
-      logits, loss = model(X, Y)
-    scaler.scale(loss).backward()
-    if grad_clip != 0.0:
-      scaler.unscale_(optimizer)
-      torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    scaler.step(optimizer)
-    scaler.update()
-    optimizer.zero_grad(set_to_none=True)
-    epoch_loss += loss.item()
+                torch.save(checkpoint, os.path.join(out_dir, f'ckpt_iter_{iter_num}_acc.pt'))
+        
+        result_dict['iter'].append(iter_num)
+        result_dict['train_loss'].append(losses['train'].item())
+        result_dict['val_loss'].append(losses['val'].item())
+        result_dict['test_acc'].append(test_accuracy if eval_addition else None)  # We don't have train accuracy during iterations
+        
+        # Save results to CSV after each evaluation
+        result_df = pd.DataFrame(result_dict)
+        result_df.to_csv(os.path.join(result_dir, 'result.csv'), index=False)
+        
+        if wandb_log:
+            wandb.log({
+                "iter": iter_num,
+                "train/loss": losses['train'],
+                "val/loss": losses['val'],
+                "lr": lr,
+                "test/accuracy": test_accuracy if eval_addition else None,
+            })
+    
     iter_num += 1
-    if iter_num > max_iters:
-      break
-  epoch_loss /= len(train_loader)
 
-  print(f"epoch {epoch+1}: train loss {epoch_loss:.4f}")
-  if iter_num > max_iters:
-    print(f"stopping after {iter_num} iterations")
-    break
+# Save final checkpoint
+checkpoint = {
+    'model': raw_model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'best_accuracy': best_accuracy,
+    'config': config,
+    'meta': meta,
+}
+torch.save(checkpoint, os.path.join(out_dir, f'ckpt_final.pt'))
 
+if wandb_log:
+    wandb.finish()
 
-epoch_loss = 0
-samples_processed = 0
 
 losses = estimate_loss()
+
 if eval_addition:
   config['start'] = start
-  test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, num_digit=num_digit, zero_pad=zero_pad,
+  test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
                                                     binary=binary, data_type = data_type, operator=operator, data_format=data_format,analyze=True)
   import csv
   correct_path = os.path.join(result_dir, 'correct_examples.csv')
   with open(correct_path, 'w', newline='') as csvfile:
-    fieldnames = ['a', 'b', 'c', 'chat', 'output']
+    fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
     for i, nums in enumerate(correct):
-        a, b, c, output, chat = nums
-        writer.writerow({'a': a, 'b': b, 'c': c, 'chat': chat, 'output': output})
+        operands, result, outcome, c_hat2 = nums
+        writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
 if eval_addition_train:
     config['start'] = start_train
-    train_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, num_digit=num_digit, zero_pad=zero_pad,
+    train_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
                                                     binary=binary, data_type=data_type, operator=operator, data_format=data_format)
 if wandb_log:
   wandb_dict = {
-      "epoch": max_epochs,
+      "iter": iter_num,
       "train/loss": losses['train'],
       "val/loss": losses['val'],
       "lr": lr,
-      "mfu": running_mfu*100, # convert to percentage,
       "test/accuracy": test_accuracy if eval_addition else None,
-      "train/accuracy": train_accuracy if eval_addition_train else None
   }
   wandb.log(wandb_dict)
-result_dict['epoch'].append(max_epochs)
 result_dict['iter'].append(iter_num)
 result_dict['train_loss'].append(losses['train'].item())
 result_dict['val_loss'].append(losses['val'].item())
 result_dict['test_acc'].append(test_accuracy if eval_addition else None)
-result_dict['train_acc'].append(train_accuracy if eval_addition_train else None)
+
 result_df = pd.DataFrame(result_dict)
 result_df.to_csv(os.path.join(result_dir, 'result.csv'), index=False)
 checkpoint = {
-                'model': raw_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'model_args': model_args,
-                'iter_num': iter_num,
-                'best_val_loss': best_val_loss,
-                'best_perplexity': best_perplexity,
-                'best_accuracy': best_accuracy,
-                'config': config,
-            }
-ckpt_path_name = f'ckpt_epoch_{max_epochs}.pt'
+    'model': raw_model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'best_accuracy': best_accuracy,
+    'config': config,
+}
+ckpt_path_name = f'ckpt_iter_{iter_num}.pt'
 print(f"saving checkpoint to {out_dir}/{ckpt_path_name}")
 torch.save(checkpoint, os.path.join(out_dir, ckpt_path_name))
+
+if wandb_log:
+    wandb.finish()
