@@ -422,7 +422,7 @@ while iter_num < max_iters:
                 decode=lambda x: decode_addition(x, meta),
                 num_digit=num_digit, zero_pad=zero_pad,
                 reverse_ab=reverse_ab, reverse_c=reverse_c,
-                binary=binary, data_type=data_type, operator=operator, data_format=data_format)
+                data_type=data_type, operator=operator, data_format=data_format)
             
             if test_accuracy > best_accuracy:
                 best_accuracy = test_accuracy
@@ -482,7 +482,7 @@ if eval_addition:
   test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
                 decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
-                                                    binary=binary, data_type = data_type, operator=operator, data_format=data_format,analyze=True)
+                                                    data_type = data_type, operator=operator, data_format=data_format,analyze=True)
   import csv
   correct_path = os.path.join(result_dir, 'correct_examples.csv')
   with open(correct_path, 'w', newline='') as csvfile:
@@ -497,7 +497,7 @@ if eval_addition_train:
     train_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
                 decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
                                                     reverse_ab=reverse_ab, reverse_c=reverse_c, algo_reason=algo_reason,
-                                                    binary=binary, data_type=data_type, operator=operator, data_format=data_format)
+                                                    data_type=data_type, operator=operator, data_format=data_format)
 if wandb_log:
   wandb_dict = {
       "iter": iter_num,
