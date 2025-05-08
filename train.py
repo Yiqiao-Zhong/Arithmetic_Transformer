@@ -383,6 +383,10 @@ def get_infinite_dataloader(dataloader):
             yield batch
 
 train_loader_iter = get_infinite_dataloader(train_loader)
+if 'max_new_tokens' in config.keys():
+    print(f"max_new_tokens: {config['max_new_tokens']}")
+else:
+    print(f"max_new_tokens used: {num_digit+2}")
 
 # Training loop - iteration based
 while iter_num < max_iters:
