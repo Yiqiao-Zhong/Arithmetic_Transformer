@@ -688,12 +688,6 @@ if wandb_log:
             final_dict[f"final_test/accuracy_{test_name}"] = accuracy
     wandb.log(final_dict)
 
-# Save final training metrics
-result_dict['iter'].append(iter_num)
-result_dict['train_loss'].append(losses['train'].item())
-result_dict['val_loss'].append(losses['val'].item())
-result_dict['test_acc'].append(test_accuracy)
-result_dict['train_acc'].append(train_accuracy)
-
+# Save final DataFrame
 result_df = pd.DataFrame(result_dict)
 result_df.to_csv(os.path.join(result_dir, 'training_metrics.csv'), index=False)
