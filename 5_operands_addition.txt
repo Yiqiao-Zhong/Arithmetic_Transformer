@@ -21,9 +21,9 @@ block_size = 32 # context of up to 256 previous characters
 ckpt_path_name = 'ckpt_reverse_5_addition_10000.pt'
 reverse_c = True
 eval_addition = True
-start = 'FILE:/content/drive/MyDrive/addition/addition_5_operands/5_addition_test_200.txt'
-eval_addition_train = False
-start_train = "FILE:/content/drive/MyDrive/addition/data/train_test_additionOperations_4_numOfChars_4_numOfSamples_100.txt"
+start = 'FILE:/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_train_pad_10000_2.txt'
+eval_addition_train = True
+start_train = "FILE:/content/drive/MyDrive/addition/addition_5_operands/5_addition_train_test_100_2.txt"
 analysis = False
 num_addition = 3
 num_digit = 1
@@ -43,7 +43,10 @@ out_dir = '/content/drive/MyDrive/addition/reverse_5_addition_10000/out'
 
 init_from = 'scratch'
 
-train_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_train_pad_10000.txt'
+train_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_train_10000_2.txt'
 val_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_pad_val_200.txt'
 
 max_new_tokens = 3
+
+test_dir = '/content/drive/MyDrive/addition/addition_5_operands/test'  # Directory containing test files
+eval_additional_test = True  # whether to evaluate on additional test files

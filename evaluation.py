@@ -6,6 +6,7 @@ import random
 import math
 import os
 import pandas as pd
+import csv
 
 
 def get_abc_new(abc: str, zero_pad=False, reverse_ab=False, binary=False):
@@ -269,3 +270,75 @@ def evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, n
         num_digit=num_digit, zero_pad=zero_pad, reverse_c=reverse_c,
         add_space=add_space, operator=operator, verbose_correct=verbose_correct, analyze=analyze
     )
+
+def evaluate_multiple_files(config, model, ctx, encode, decode, test_files, iter_num, result_dir,
+                          verbose=False, num_digit=3, zero_pad=False, reverse_ab=False, reverse_c=False,
+                          data_type='binary', operator='+', data_format='plain', add_space=False, analyze=False):
+    """
+    Evaluate model on multiple test files and store results.
+    Args:
+        test_files: List of test file paths
+        iter_num: Current iteration number
+        result_dir: Directory to store results
+    Returns:
+        dict: Dictionary containing accuracies for each test file
+    """
+    results = {}
+    
+    for test_file in test_files:
+        # Get test file name without path and extension
+        test_name = os.path.splitext(os.path.basename(test_file))[0]
+        
+        # Set the current test file as start
+        config['start'] = f"FILE:{test_file}"
+        
+        # Run evaluation
+        accuracy, metrics, correct, incorrect = evaluate_addition_batch(
+            config, model, ctx, encode=encode, decode=decode,
+            verbose=verbose, num_digit=num_digit, zero_pad=zero_pad,
+            reverse_ab=reverse_ab, reverse_c=reverse_c,
+            data_type=data_type, operator=operator,
+            data_format=data_format, analyze=analyze
+        )
+        
+        results[test_name] = accuracy
+        
+        # Path for this test file's results
+        results_file = os.path.join(result_dir, f'{test_name}_results.csv')
+        
+        # Combine correct and incorrect examples and sort by operands to maintain consistent order
+        all_examples = correct + incorrect
+        all_examples.sort(key=lambda x: x[0])  # Sort by operands
+        
+        # Read existing results if file exists
+        if os.path.exists(results_file):
+            df = pd.read_csv(results_file, index_col=0)
+        else:
+            # Create new DataFrame with operands and actual results
+            df = pd.DataFrame({
+                'operands': [ex[0] for ex in all_examples],
+                'actual': [ex[1] for ex in all_examples]
+            })
+        
+        # Add predictions for this iteration
+        df[f'pred_iter_{iter_num}'] = [ex[3] for ex in all_examples]
+        
+        # Add accuracy as a special row
+        df.loc['accuracy', f'pred_iter_{iter_num}'] = accuracy
+        
+        # Save results
+        df.to_csv(results_file)
+        
+        # Also save a summary of accuracies in a separate file
+        accuracy_file = os.path.join(result_dir, f'{test_name}_accuracy.csv')
+        if os.path.exists(accuracy_file):
+            acc_df = pd.read_csv(accuracy_file)
+        else:
+            acc_df = pd.DataFrame(columns=['iteration', 'accuracy'])
+        
+        # Add new accuracy
+        new_row = pd.DataFrame({'iteration': [iter_num], 'accuracy': [accuracy]})
+        acc_df = pd.concat([acc_df, new_row], ignore_index=True)
+        acc_df.to_csv(accuracy_file, index=False)
+    
+    return results

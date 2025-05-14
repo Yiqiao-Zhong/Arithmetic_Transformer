@@ -172,6 +172,9 @@ random_C=False
 use_lora = False # use lora (from minLoRA)
 print_interval = 2  # if we're using gpt-2 model, I want to see it prompted on text
 
+# Add this near the top with other config variables
+test_dir = None  # Directory containing test files
+eval_additional_test = False  # whether to evaluate on additional test files
 
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str, type(None)))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -353,7 +356,13 @@ val_loader = DataLoader(
 
 # encode, decode = get_encode_decode(meta_path, tokenizer=tokenizer)
 
-result_dict = {'iter' : [], 'train_loss': [], 'val_loss': [], 'test_acc': []}
+result_dict = {
+    'iter': [],
+    'train_loss': [],
+    'val_loss': [],
+    'test_acc': [],
+    'train_acc': []
+}
 
 result_dir = get_results_dir(config)
 config['result_dir'] = result_dir
@@ -420,14 +429,39 @@ while iter_num < max_iters:
     if iter_num % eval_interval == 0:
         losses = estimate_loss()
         print(f"iter {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        
+        # Initialize wandb_dict for this iteration
+        wandb_dict = {
+            "iter": iter_num,
+            "train/loss": losses['train'],
+            "val/loss": losses['val'],
+            "lr": lr,
+        }
+
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
+        
+        # Regular test evaluation
+        test_accuracy = None
         if eval_addition:
             config['start'] = start
-            test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
-                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
-                                                    reverse_ab=reverse_ab, reverse_c=reverse_c,
-                                                    data_type=data_type, operator=operator, data_format=data_format, analyze=True)
+            test_accuracy, _ , correct, incorrect = evaluate_addition_batch(
+                config, model, ctx, 
+                encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta), 
+                verbose=False, 
+                num_digit=num_digit, 
+                zero_pad=zero_pad,
+                reverse_ab=reverse_ab, 
+                reverse_c=reverse_c,
+                data_type=data_type, 
+                operator=operator, 
+                data_format=data_format, 
+                analyze=True
+            )
+            
+            # Add test accuracy to wandb_dict
+            wandb_dict["test/accuracy"] = test_accuracy
             
             if test_accuracy > best_accuracy and iter_num % 5 * eval_interval == 0:
                 best_accuracy = test_accuracy
@@ -443,23 +477,82 @@ while iter_num < max_iters:
                 }
                 torch.save(checkpoint, os.path.join(out_dir, f'ckpt_iter_{iter_num}_acc.pt'))
         
+        # Training data evaluation
+        train_accuracy = None
+        if eval_addition_train:
+            config['start'] = start_train
+            train_accuracy, _ , correct, incorrect = evaluate_addition_batch(
+                config, model, ctx, 
+                encode=lambda x: encode_addition(x, meta),
+                decode=lambda x: decode_addition(x, meta), 
+                verbose=False, 
+                num_digit=num_digit, 
+                zero_pad=zero_pad,
+                reverse_ab=reverse_ab, 
+                reverse_c=reverse_c,
+                data_type=data_type, 
+                operator=operator, 
+                data_format=data_format
+            )
+            
+            # Add train accuracy to wandb_dict
+            wandb_dict["train/accuracy"] = train_accuracy
+        
+        # Additional test files evaluation
+        if eval_additional_test and test_dir:
+            # Get all files from the test directory
+            test_files = []
+            for file in os.listdir(test_dir):
+                if os.path.isfile(os.path.join(test_dir, file)):
+                    test_files.append(os.path.join(test_dir, file))
+            
+            if not test_files:
+                print(f"Warning: No files found in test directory: {test_dir}")
+            else:
+                # Evaluate on all test files
+                test_results = evaluate_multiple_files(
+                    config, model, ctx,
+                    encode=lambda x: encode_addition(x, meta),
+                    decode=lambda x: decode_addition(x, meta),
+                    test_files=test_files,
+                    iter_num=iter_num,
+                    result_dir=result_dir,
+                    verbose=False,
+                    num_digit=num_digit,
+                    zero_pad=zero_pad,
+                    reverse_ab=reverse_ab,
+                    reverse_c=reverse_c,
+                    data_type=data_type,
+                    operator=operator,
+                    data_format=data_format,
+                    analyze=True
+                )
+                
+                # Log results
+                print("\nTest Results:")
+                for test_name, accuracy in test_results.items():
+                    # Update result_dict with per-file accuracy
+                    if f'test_acc_{test_name}' not in result_dict:
+                        result_dict[f'test_acc_{test_name}'] = []
+                    result_dict[f'test_acc_{test_name}'].append(accuracy)
+                    
+                    # Add additional test accuracies to wandb_dict
+                    wandb_dict[f"test/accuracy_{test_name}"] = accuracy
+        
+        # Update and save basic metrics
         result_dict['iter'].append(iter_num)
         result_dict['train_loss'].append(losses['train'].item())
         result_dict['val_loss'].append(losses['val'].item())
-        result_dict['test_acc'].append(test_accuracy if eval_addition else None)  # We don't have train accuracy during iterations
+        result_dict['test_acc'].append(test_accuracy)
+        result_dict['train_acc'].append(train_accuracy)
         
         # Save results to CSV after each evaluation
         result_df = pd.DataFrame(result_dict)
-        result_df.to_csv(os.path.join(result_dir, 'result.csv'), index=False)
+        result_df.to_csv(os.path.join(result_dir, 'training_metrics.csv'), index=False)
         
+        # Single wandb log per iteration with all metrics
         if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "test/accuracy": test_accuracy if eval_addition else None,
-            })
+            wandb.log(wandb_dict)
     
     iter_num += 1
 
@@ -480,64 +573,114 @@ torch.save(checkpoint, os.path.join(out_dir, f'ckpt_final.pt'))
 losses = estimate_loss()
 
 if eval_addition:
-  config['start'] = start
-  test_accuracy, _ , correct, incorrect = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
-                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
-                                                    reverse_ab=reverse_ab, reverse_c=reverse_c,
-                                                    data_type=data_type, operator=operator, data_format=data_format, analyze=True)
-  import csv
-  # Save correct examples
-  correct_path = os.path.join(result_dir, 'correct_examples.csv')
-  with open(correct_path, 'w', newline='') as csvfile:
-    fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    writer.writeheader()
-    for i, nums in enumerate(correct):
-        operands, result, outcome, c_hat2 = nums
-        writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
-  
-  # Save incorrect examples
-  incorrect_path = os.path.join(result_dir, 'incorrect_examples.csv')
-  with open(incorrect_path, 'w', newline='') as csvfile:
-    fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    writer.writeheader()
-    for i, nums in enumerate(incorrect):
-        operands, result, outcome, c_hat2 = nums
-        writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
+    config['start'] = start
+    test_accuracy, _ , correct, incorrect = evaluate_addition_batch(
+        config, model, ctx, 
+        encode=lambda x: encode_addition(x, meta),
+        decode=lambda x: decode_addition(x, meta), 
+        verbose=False, 
+        num_digit=num_digit, 
+        zero_pad=zero_pad,
+        reverse_ab=reverse_ab, 
+        reverse_c=reverse_c,
+        data_type=data_type, 
+        operator=operator, 
+        data_format=data_format, 
+        analyze=True
+    )
+    import csv
+    # Save correct examples
+    correct_path = os.path.join(result_dir, 'correct_examples.csv')
+    with open(correct_path, 'w', newline='') as csvfile:
+        fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for i, nums in enumerate(correct):
+            operands, result, outcome, c_hat2 = nums
+            writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
+    
+    # Save incorrect examples
+    incorrect_path = os.path.join(result_dir, 'incorrect_examples.csv')
+    with open(incorrect_path, 'w', newline='') as csvfile:
+        fieldnames = ['operands', 'result', 'outcome', 'c_hat2']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for i, nums in enumerate(incorrect):
+            operands, result, outcome, c_hat2 = nums
+            writer.writerow({'operands': operands, 'result': result, 'outcome': outcome, 'c_hat2': c_hat2})
+
 if eval_addition_train:
     config['start'] = start_train
-    train_accuracy, *_ = evaluate_addition_batch(config, model, ctx, encode=lambda x: encode_addition(x, meta),
-                decode=lambda x: decode_addition(x, meta), verbose=False, num_digit=num_digit, zero_pad=zero_pad,
-                                                    reverse_ab=reverse_ab, reverse_c=reverse_c,
-                                                    data_type=data_type, operator=operator, data_format=data_format)
+    train_accuracy, _ , correct, incorrect = evaluate_addition_batch(
+        config, model, ctx, 
+        encode=lambda x: encode_addition(x, meta),
+        decode=lambda x: decode_addition(x, meta), 
+        verbose=False, 
+        num_digit=num_digit, 
+        zero_pad=zero_pad,
+        reverse_ab=reverse_ab, 
+        reverse_c=reverse_c,
+        data_type=data_type, 
+        operator=operator, 
+        data_format=data_format
+    )
+    
+    
+if eval_additional_test and test_dir:
+    # Get all files from the test directory
+    test_files = []
+    for file in os.listdir(test_dir):
+        if os.path.isfile(os.path.join(test_dir, file)):
+            test_files.append(os.path.join(test_dir, file))
+    
+    if not test_files:
+        print(f"Warning: No files found in test directory: {test_dir}")
+    else:
+        final_results = evaluate_multiple_files(
+            config, model, ctx,
+            encode=lambda x: encode_addition(x, meta),
+            decode=lambda x: decode_addition(x, meta),
+            test_files=test_files,
+            iter_num='final',
+            result_dir=result_dir,
+            verbose=False,
+            num_digit=num_digit,
+            zero_pad=zero_pad,
+            reverse_ab=reverse_ab,
+            reverse_c=reverse_c,
+            data_type=data_type,
+            operator=operator,
+            data_format=data_format,
+            analyze=True
+        )
+        
+        print("\nFinal Test Results:")
+        for test_name, accuracy in final_results.items():
+            print(f"{test_name}: {accuracy:.2f}%")
+        print()
 
+
+# Final wandb logging
 if wandb_log:
-  wandb_dict = {
-      "iter": iter_num,
-      "train/loss": losses['train'],
-      "val/loss": losses['val'],
-      "lr": lr,
-      "test/accuracy": test_accuracy if eval_addition else None,
-  }
-  wandb.log(wandb_dict)
+    final_dict = {
+        "iter": iter_num,
+        "train/loss": losses['train'],
+        "val/loss": losses['val'],
+        "lr": lr,
+        "test/accuracy": test_accuracy if eval_addition else None,
+        "train/accuracy": train_accuracy if eval_addition_train else None,
+    }
+    if eval_additional_test and test_dir:
+        for test_name, accuracy in final_results.items():
+            final_dict[f"final_test/accuracy_{test_name}"] = accuracy
+    wandb.log(final_dict)
 
+# Save final training metrics
 result_dict['iter'].append(iter_num)
 result_dict['train_loss'].append(losses['train'].item())
 result_dict['val_loss'].append(losses['val'].item())
-result_dict['test_acc'].append(test_accuracy if eval_addition else None)
+result_dict['test_acc'].append(test_accuracy)
+result_dict['train_acc'].append(train_accuracy)
 
 result_df = pd.DataFrame(result_dict)
-result_df.to_csv(os.path.join(result_dir, 'result.csv'), index=False)
-checkpoint = {
-    'model': raw_model.state_dict(),
-    'optimizer': optimizer.state_dict(),
-    'model_args': model_args,
-    'iter_num': iter_num,
-    'best_val_loss': best_val_loss,
-    'best_accuracy': best_accuracy,
-    'config': config,
-}
-
-if wandb_log:
-    wandb.finish()
+result_df.to_csv(os.path.join(result_dir, 'training_metrics.csv'), index=False)
