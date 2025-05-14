@@ -356,6 +356,7 @@ val_loader = DataLoader(
 
 # encode, decode = get_encode_decode(meta_path, tokenizer=tokenizer)
 
+# Initialize result_dict with basic metrics
 result_dict = {
     'iter': [],
     'train_loss': [],
@@ -363,6 +364,13 @@ result_dict = {
     'test_acc': [],
     'train_acc': []
 }
+
+# Initialize test accuracy keys for all test files
+if eval_additional_test and test_dir:
+    test_files = [f for f in os.listdir(test_dir) if os.path.isfile(os.path.join(test_dir, f))]
+    for test_file in test_files:
+        test_name = os.path.splitext(os.path.basename(test_file))[0]
+        result_dict[f'test_acc_{test_name}'] = []
 
 result_dir = get_results_dir(config)
 config['result_dir'] = result_dir
@@ -500,7 +508,6 @@ while iter_num < max_iters:
         
         # Additional test files evaluation
         if eval_additional_test and test_dir:
-            # Get all files from the test directory
             test_files = []
             for file in os.listdir(test_dir):
                 if os.path.isfile(os.path.join(test_dir, file)):
@@ -531,13 +538,12 @@ while iter_num < max_iters:
                 # Log results
                 print("\nTest Results:")
                 for test_name, accuracy in test_results.items():
-                    # Update result_dict with per-file accuracy
-                    if f'test_acc_{test_name}' not in result_dict:
-                        result_dict[f'test_acc_{test_name}'] = []
+                    print(f"{test_name}: {accuracy:.2f}%")
+                    # Add accuracy to result_dict (key was initialized at start)
                     result_dict[f'test_acc_{test_name}'].append(accuracy)
-                    
-                    # Add additional test accuracies to wandb_dict
+                    # Add to wandb_dict
                     wandb_dict[f"test/accuracy_{test_name}"] = accuracy
+                print()
         
         # Update and save basic metrics
         result_dict['iter'].append(iter_num)
@@ -545,6 +551,13 @@ while iter_num < max_iters:
         result_dict['val_loss'].append(losses['val'].item())
         result_dict['test_acc'].append(test_accuracy)
         result_dict['train_acc'].append(train_accuracy)
+
+        # For any test file that wasn't evaluated this iteration, add None to maintain array lengths
+        if eval_additional_test and test_dir:
+            for test_file in test_files:
+                test_name = os.path.splitext(os.path.basename(test_file))[0]
+                if test_name not in test_results:
+                    result_dict[f'test_acc_{test_name}'].append(None)
         
         # Save results to CSV after each evaluation
         result_df = pd.DataFrame(result_dict)
