@@ -168,19 +168,15 @@ def evaluate_addition_precomputed(config, model, ctx, decode, batch_list, total,
                     c_hat2 = c_hat
                     if zero_pad:
                         c_hat2 = remove_zero_pad(c_hat)
-                        print(f"Debug - After zero pad removal: {c_hat2}")
 
                     # plain addition
                     c_hat2 = c_hat2.split('\n')[0]
-                    print(f"Debug - After newline split: {c_hat2}")
 
                     if reverse_c:
                         c_hat2 = reverse_string(c_hat2)
-                        print(f"Debug - After reverse: {c_hat2}")
 
                     if add_space:
                         c_hat2 = c_hat2.replace(' ', '')
-                        print(f"Debug - After space removal: {c_hat2}")
 
                     if is_number(c_hat2):
                         if '.' in c_hat2:
@@ -310,26 +306,28 @@ def evaluate_multiple_files(config, model, ctx, encode, decode, test_files, iter
         all_examples = correct + incorrect
         all_examples.sort(key=lambda x: x[0])  # Sort by operands
         
-        # Read existing results if file exists
+        # Create new DataFrame with operands and actual results
+        new_df = pd.DataFrame({
+            'operands': [ex[0] for ex in all_examples],
+            'actual': [ex[1] for ex in all_examples],
+            f'pred_iter_{iter_num}': [ex[3] for ex in all_examples]
+        })
+        
+        # Read existing results if file exists and merge
         if os.path.exists(results_file):
-            df = pd.read_csv(results_file, index_col=0)
+            old_df = pd.read_csv(results_file)
+            # Merge based on operands, keeping all predictions
+            if 'operands' in old_df.columns:
+                merged_df = pd.merge(old_df, new_df, on=['operands', 'actual'], how='outer')
+            else:
+                merged_df = new_df
         else:
-            # Create new DataFrame with operands and actual results
-            df = pd.DataFrame({
-                'operands': [ex[0] for ex in all_examples],
-                'actual': [ex[1] for ex in all_examples]
-            })
-        
-        # Add predictions for this iteration
-        df[f'pred_iter_{iter_num}'] = [ex[3] for ex in all_examples]
-        
-        # Add accuracy as a special row
-        df.loc['accuracy', f'pred_iter_{iter_num}'] = accuracy
+            merged_df = new_df
         
         # Save results
-        df.to_csv(results_file)
+        merged_df.to_csv(results_file, index=False)
         
-        # Also save a summary of accuracies in a separate file
+        # Save accuracy separately in a summary file
         accuracy_file = os.path.join(result_dir, f'{test_name}_accuracy.csv')
         if os.path.exists(accuracy_file):
             acc_df = pd.read_csv(accuracy_file)

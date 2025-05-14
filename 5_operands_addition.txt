@@ -43,7 +43,7 @@ out_dir = '/content/drive/MyDrive/addition/reverse_5_addition_10000/out'
 
 init_from = 'scratch'
 
-train_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_train_10000_2.txt'
+train_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_train_pad_10000_2.txt'
 val_data_path = '/content/drive/MyDrive/addition/addition_5_operands/reverse_5_addition_pad_val_200.txt'
 
 max_new_tokens = 3
