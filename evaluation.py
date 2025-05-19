@@ -109,7 +109,7 @@ def prepare_addition_batches(config, encode, num_digit=3, zero_pad=False, revers
     
     # Cache the batches using a hash of the configuration
     config_hash = hash(frozenset({k: str(v) for k, v in config.items() if k != 'device'}.items()))
-    batch_key = f"{config_hash}_{data_type}_{operator}_{num_digit}_{zero_pad}_{reverse_ab}_{binary}__{data_format}_{add_space}_{simple}"
+    batch_key = f"{config_hash}_{data_type}_{operator}_{num_digit}_{zero_pad}_{reverse_ab}_{data_format}_{add_space}"
     _precomputed_batches[batch_key] = (batch_list, total)
     
     return batch_list, total
@@ -248,7 +248,7 @@ def evaluate_addition_batch(config, model, ctx, encode, decode, verbose=False, n
                           reverse_ab=False, reverse_c=False, data_type='binary', operator='+', 
                           data_format='plain', add_space=False, verbose_correct=False, analyze=False):
     config_hash = hash(frozenset({k: str(v) for k, v in config.items() if k != 'device'}.items()))
-    batch_key = f"{config_hash}_{data_type}_{operator}_{num_digit}_{zero_pad}_{reverse_ab}_False_{data_format}_{add_space}_False"
+    batch_key = f"{config_hash}_{data_type}_{operator}_{num_digit}_{zero_pad}_{reverse_ab}_{data_format}_{add_space}"
     
     if batch_key in _precomputed_batches:
         print("Using precomputed batches")
