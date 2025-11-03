@@ -1,345 +1,342 @@
 #!/usr/bin/env python3
+"""Utility for generating multiplication datasets with controllable digit lengths.
+
+Examples are written in the form ``a*b=c$``.  The number of digits in both ``a`` and
+``b`` is drawn from user-supplied discrete distributions (supporting up to 128
+possible digit lengths).  Once a digit-length has been selected, the value is
+sampled uniformly from the integers that have that many digits.
+
+The script mirrors the interface of the other generators in this project: it
+accepts train/validation/test sizes, a random seed, and an output directory.
 """
-Generate multiplication dataset for (a * b) where:
- - a in [0, 999_999] (0..6-digit)
- - b in [0, 9] (1-digit)
-Training examples are drawn from the first N buckets partitioned by digit-length of `a`.
-Train-bucket relative ratios (default full list): (100, 200, 400, 800, 1500, 7000)
-Use --num_operands to pick a prefix of the above list (1..6).
-Example: num_operands=4 -> ratios [100,200,400,800] (ones..fours)
-"""
+
+from __future__ import annotations
+
 import argparse
 import random
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Set
+from typing import List, Optional, Sequence, Tuple
 
-# default values matching your original script
-DEFAULT_TRAIN_SIZE = 10_000   # total training examples (will be split proportionally)
-DEFAULT_TEST_SIZE  = 3_000
-DEFAULT_VAL_SIZE   = 3_000
-DEFAULT_OUT_DIR    = "."
-DEFAULT_SEED       = 42
-DEFAULT_NUM_OPERANDS = 6  # default use all six buckets
+DEFAULT_TRAIN_SIZE = 10_000
+DEFAULT_VAL_SIZE = 3_000
+DEFAULT_TEST_SIZE = 3_000
+DEFAULT_OUTPUT_DIR = "."
+DEFAULT_SEED = 42
+MAX_SUPPORTED_DIGITS = 128
 
-# bucket ratios and population sizes (a ranges)
-BUCKET_RATIOS = [100, 200, 400, 800, 1500, 7000]  # ones, twos, threes, fours, fives, sixes
-# For 'a' digit buckets the counts of a-values are:
-# ones: 0..9 (10 values), twos: 10..99 (90), threes:100..999 (900),
-# four:1000..9999 (9000), five:10000..99999 (90000), six:100000..999999 (900000)
-A_BUCKET_RANGES = [
-    (0, 10),       # ones: a in [0,9]    -> count_a = 10
-    (10, 100),     # twos: a in [10,99]  -> count_a = 90
-    (100, 1000),   # threes: [100,999]   -> 900
-    (1000, 10000), # fours: [1000,9999]  -> 9000
-    (10000, 100000),# fives: [10000,99999]-> 90000
-    (100000, 1000000) # sixes: [100000,999999] -> 900000
-]
 
-def compute_bucket_counts(train_total: int, ratios: List[int]) -> List[int]:
-    total_ratio = sum(ratios)
-    # initial integer allocation (floor)
-    counts = [train_total * r // total_ratio for r in ratios]
-    # distribute remainder to last buckets (to make sum == train_total)
-    remainder = train_total - sum(counts)
-    i = len(counts) - 1
-    while remainder > 0:
-        counts[i] += 1
-        remainder -= 1
-        i -= 1
-        if i < 0:
-            i = len(counts) - 1
-    return counts
+class ProbabilityParseError(ValueError):
+    """Raised when a probability specification is invalid."""
 
-def bucket_population_sizes(ranges: List[Tuple[int,int]] = None) -> List[int]:
-    # Each a-value pairs with 10 b-values, so population per bucket is (count_a * 10)
-    if ranges is None:
-        ranges = A_BUCKET_RANGES
-    pops = []
-    for a0, a1 in ranges:
-        count_a = a1 - a0
-        pops.append(count_a * 10)
-    return pops
 
-def sample_pairs_from_bucket(bucket_idx: int, k: int, rng: random.Random) -> List[Tuple[int,int]]:
-    """
-    Sample k unique (a,b) pairs from bucket bucket_idx.
-    bucket_idx is the index into the global A_BUCKET_RANGES (0..5).
-    Sampling uses integer indexes to avoid materializing all pairs when the population is large.
-    """
-    a0, a1 = A_BUCKET_RANGES[bucket_idx]
-    count_a = a1 - a0
-    pop = count_a * 10  # total pairs in this bucket
-    if k < 0:
-        raise ValueError("k must be non-negative")
-    if k == 0:
-        return []
+@dataclass(frozen=True)
+class DigitLengthDistribution:
+    """Distribution over digit lengths 1..N with cached sampling metadata."""
 
-    if k > pop:
-        raise ValueError(f"Requested {k} samples from bucket {bucket_idx} but bucket only has {pop} pairs.")
+    probabilities: Tuple[float, ...]
+    cumulative: Tuple[float, ...]
+    ranges: Tuple[Tuple[int, int], ...]
 
-    # sample unique indices in [0, pop)
-    chosen_indices = rng.sample(range(pop), k)
-    pairs = []
-    for idx in chosen_indices:
-        a = a0 + (idx // 10)
-        b = idx % 10
-        pairs.append((a, b))
-    return pairs
+    @property
+    def num_lengths(self) -> int:
+        return len(self.probabilities)
 
-def global_index(a: int, b: int) -> int:
-    """Map pair (a,b) to unique global index in [0, 10_000_000)."""
-    return a * 10 + b
+    def sample_length(self, rng: random.Random) -> int:
+        """Draw a digit length in ``1..num_lengths`` according to the distribution."""
 
-def _redistribute_surplus_to_higher(
-    requested: List[int],
-    ratios: List[int],
-    start_idx: int,
-    surplus: int
-) -> None:
-    """
-    Add `surplus` to requested counts of buckets > start_idx according to ratios.
-    Uses floor allocation with largest-remainder tie-breaking.
-    Modifies requested in-place.
-    """
-    n = len(requested)
-    available_idxs = [j for j in range(start_idx + 1, n)]
-    if not available_idxs:
-        raise ValueError("No higher buckets available to receive surplus.")
+        draw = rng.random()
+        for idx, threshold in enumerate(self.cumulative):
+            # Guard against floating point round-off by returning the last bucket.
+            if draw < threshold or idx == self.num_lengths - 1:
+                return idx + 1
+        return self.num_lengths
 
-    # sum of ratios for higher buckets
-    sum_r = sum(ratios[j] for j in available_idxs)
-    if sum_r <= 0:
-        raise ValueError("Higher buckets have zero total ratio; cannot redistribute.")
+    def sample_value(self, rng: random.Random) -> Tuple[int, int]:
+        """Sample a value and report the digit-length used for bookkeeping."""
 
-    # compute raw allocations
-    raw_allocs = []
-    for j in available_idxs:
-        raw = surplus * (ratios[j] / sum_r)
-        raw_allocs.append(raw)
+        length = self.sample_length(rng)
+        low, high = self.ranges[length - 1]
+        value = rng.randint(low, high)
+        return length, value
 
-    floor_allocs = [int(x) for x in raw_allocs]
-    allocated = sum(floor_allocs)
-    remainder = surplus - allocated
 
-    # fractional parts for largest-remainder method
-    fracs = [(i, raw_allocs[i] - floor_allocs[i]) for i in range(len(floor_allocs))]
-    # sort indexes by fractional part descending
-    fracs.sort(key=lambda x: x[1], reverse=True)
+def _normalize_probabilities(values: Sequence[float]) -> List[float]:
+    if not values:
+        raise ProbabilityParseError("Probability list cannot be empty.")
+    if len(values) > MAX_SUPPORTED_DIGITS:
+        raise ProbabilityParseError(
+            f"At most {MAX_SUPPORTED_DIGITS} probabilities are supported; received {len(values)}."
+        )
+    if any(v < 0 for v in values):
+        raise ProbabilityParseError("Probabilities must be non-negative numbers.")
 
-    # distribute remainder one-by-one to buckets with largest fractional parts
-    extra = [0] * len(floor_allocs)
-    for idx_in_list, frac in fracs:
-        if remainder <= 0:
-            break
-        extra[idx_in_list] += 1
-        remainder -= 1
+    total = sum(values)
+    if total <= 0:
+        raise ProbabilityParseError("Probability list must contain at least one positive value.")
 
-    # apply allocations to requested
-    for local_i, j in enumerate(available_idxs):
-        add_amount = floor_allocs[local_i] + extra[local_i]
-        if add_amount:
-            requested[j] += add_amount
+    return [v / total for v in values]
 
-def rebalance_requested_counts(
-    requested: List[int],
-    pops: List[int],
-    ratios: List[int]
-) -> List[int]:
-    """
-    Given initial requested counts per bucket, cap buckets at their population and
-    redistribute surplus to higher-digit buckets according to original ratios.
-    Iteratively handles cascading overflows. Returns final assigned counts (sum should
-    equal sum(requested_initial) unless total population < requested_total, in which
-    case a ValueError is raised.
-    """
-    n = len(requested)
-    requested = requested[:]  # local copy (we will mutate it)
-    total_requested = sum(requested)
-    total_population = sum(pops)
-    if total_population < total_requested:
-        raise ValueError(f"Total available pairs ({total_population}) < requested train_total ({total_requested}). "
-                         "Cannot satisfy request even after redistribution.")
 
-    # iterate left-to-right and cap+redistribute surplus
-    for i in range(n):
-        if requested[i] <= pops[i]:
+def _build_distribution(probabilities: Sequence[float]) -> DigitLengthDistribution:
+    probs = tuple(_normalize_probabilities(probabilities))
+    cumulative: List[float] = []
+    running = 0.0
+    for p in probs:
+        running += p
+        cumulative.append(running)
+
+    ranges: List[Tuple[int, int]] = []
+    for idx in range(len(probs)):
+        digits = idx + 1
+        low = 0 if digits == 1 else 10 ** (digits - 1)
+        high = 10 ** digits - 1
+        ranges.append((low, high))
+
+    return DigitLengthDistribution(
+        probabilities=probs,
+        cumulative=tuple(cumulative),
+        ranges=tuple(ranges),
+    )
+
+
+def _parse_probability_string(raw: str, *, flag_name: str) -> List[float]:
+    if raw is None:
+        raise ProbabilityParseError(f"Missing probability specification for {flag_name}.")
+
+    pieces = [piece.strip() for piece in raw.split(",") if piece.strip()]
+    if not pieces:
+        raise ProbabilityParseError(f"No probabilities provided for {flag_name}.")
+
+    try:
+        values = [float(piece) for piece in pieces]
+    except ValueError as exc:  # pragma: no cover - defensive path
+        raise ProbabilityParseError(f"Failed to parse probabilities for {flag_name}: {exc}") from exc
+
+    return values
+
+
+def _probabilities_from_max_digits(max_digits: int) -> List[float]:
+    if max_digits is None:
+        raise ProbabilityParseError("max_digits must be provided.")
+    if max_digits <= 0:
+        raise ProbabilityParseError("max_digits must be a positive integer.")
+    if max_digits > MAX_SUPPORTED_DIGITS:
+        raise ProbabilityParseError(
+            f"max_digits cannot exceed {MAX_SUPPORTED_DIGITS}; received {max_digits}."
+        )
+
+    weights = list(range(1, max_digits + 1))
+    total = max_digits * (max_digits + 1) / 2
+    return [weight / total for weight in weights]
+
+
+def _resolve_probability_sources(
+    a_probabilities: Optional[Sequence[float]],
+    b_probabilities: Optional[Sequence[float]],
+    max_digits: Optional[int],
+) -> Tuple[Sequence[float], Sequence[float]]:
+    """Determine the operand distributions based on the provided inputs."""
+
+    if a_probabilities is None and b_probabilities is None:
+        if max_digits is None:
+            raise ProbabilityParseError(
+                "Provide either --max_digits or both --a_length_probs and --b_length_probs."
+            )
+        inferred = _probabilities_from_max_digits(max_digits)
+        return inferred, inferred
+
+    if a_probabilities is None or b_probabilities is None:
+        raise ProbabilityParseError(
+            "Both --a_length_probs and --b_length_probs must be provided together."
+        )
+
+    if max_digits is not None:
+        raise ProbabilityParseError(
+            "--max_digits cannot be used together with explicit probability distributions."
+        )
+
+    return a_probabilities, b_probabilities
+
+
+def _format_length_counts(counts: Sequence[int]) -> str:
+    total = sum(counts)
+    if total == 0:
+        return "no samples"
+
+    parts = []
+    for idx, count in enumerate(counts, start=1):
+        if count == 0:
             continue
-        surplus = requested[i] - pops[i]
-        requested[i] = pops[i]  # cap
-        # redistribute surplus to higher buckets (may cause further overflows handled later)
-        try:
-            _redistribute_surplus_to_higher(requested, ratios, i, surplus)
-        except Exception as e:
-            # propagate as ValueError for clarity
-            raise ValueError(f"Failed to redistribute surplus from bucket {i}: {e}")
+        percentage = 100.0 * count / total
+        parts.append(f"{idx}-digit: {count} ({percentage:.2f}%)")
+    return ", ".join(parts)
 
-    # final sanity: ensure no bucket exceeds its pop
-    for i in range(n):
-        if requested[i] > pops[i]:
-            # this should not happen because we iterated left->right and redistributed forward,
-            # but guard defensively in case of rounding / numeric issues.
-            overflow = requested[i] - pops[i]
-            raise ValueError(f"After redistribution, bucket {i} still overflows by {overflow} (requested {requested[i]}, pop {pops[i]}).")
 
-    # sum check
-    if sum(requested) != total_requested:
-        # It's possible (due to rounding) to be off by 1 etc. but redistribution preserves integer sum.
-        # If this happens, fix by adjusting last bucket that still has headroom.
-        diff = total_requested - sum(requested)
-        if diff != 0:
-            # try to distribute diff to rightmost buckets with headroom
-            for j in range(n - 1, -1, -1):
-                headroom = pops[j] - requested[j]
-                if headroom <= 0:
-                    continue
-                give = min(headroom, diff)
-                requested[j] += give
-                diff -= give
-                if diff == 0:
-                    break
-            if diff != 0:
-                raise ValueError("Unable to reconcile rounding difference after redistribution.")
-    return requested
+def _write_dataset(
+    path: Path,
+    num_examples: int,
+    rng: random.Random,
+    a_dist: DigitLengthDistribution,
+    b_dist: DigitLengthDistribution,
+) -> Tuple[List[int], List[int]]:
+    counts_a = [0] * a_dist.num_lengths
+    counts_b = [0] * b_dist.num_lengths
+
+    with path.open("w", encoding="utf-8") as handle:
+        for _ in range(num_examples):
+            len_a, a_value = a_dist.sample_value(rng)
+            len_b, b_value = b_dist.sample_value(rng)
+            product = a_value * b_value
+
+            handle.write(f"{a_value}*{b_value}={product}$\n")
+
+            counts_a[len_a - 1] += 1
+            counts_b[len_b - 1] += 1
+
+    return counts_a, counts_b
+
 
 def make_dataset(
-    train_total: int = DEFAULT_TRAIN_SIZE,
-    test_size: int = DEFAULT_TEST_SIZE,
-    validation_size: int = DEFAULT_VAL_SIZE,
-    out_dir: str = DEFAULT_OUT_DIR,
-    seed: int = DEFAULT_SEED,
-    num_operands: int = DEFAULT_NUM_OPERANDS
-):
-    if not (1 <= num_operands <= 6):
-        raise ValueError("num_operands must be between 1 and 6 inclusive.")
+    *,
+    train_size: int,
+    val_size: int,
+    test_size: int,
+    output_dir: str,
+    seed: int,
+    a_probabilities: Optional[Sequence[float]] = None,
+    b_probabilities: Optional[Sequence[float]] = None,
+    max_digits: Optional[int] = None,
+) -> None:
     rng = random.Random(seed)
-    OUT_DIR = Path(out_dir)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # select the prefix of ratios and corresponding bucket ranges
-    ratios_subset = BUCKET_RATIOS[:num_operands]
-    ranges_subset = A_BUCKET_RANGES[:num_operands]
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
 
-    # compute initial requested train counts per selected bucket
-    initial_bucket_counts = compute_bucket_counts(train_total, ratios_subset)
-    pops = bucket_population_sizes(ranges_subset)
+    resolved_a, resolved_b = _resolve_probability_sources(
+        a_probabilities, b_probabilities, max_digits
+    )
 
-    # If total available < requested_total, error immediately (can't satisfy)
-    total_pop = sum(pops)
-    if total_pop < train_total:
-        raise ValueError(f"Total available pairs in selected buckets ({total_pop}) < requested train_total ({train_total}). "
-                         "Reduce train_total or increase num_operands.")
+    a_distribution = _build_distribution(resolved_a)
+    b_distribution = _build_distribution(resolved_b)
 
-    # If any bucket requests more than its pop, rebalance by pushing surplus to higher buckets
-    need_rebalance = any(req > p for req, p in zip(initial_bucket_counts, pops))
-    final_bucket_counts = initial_bucket_counts
-    if need_rebalance:
-        print("Some buckets request more samples than available. Rebalancing surplus to higher-digit buckets.")
-        print("Initial requested per-bucket counts:", initial_bucket_counts)
-        try:
-            final_bucket_counts = rebalance_requested_counts(initial_bucket_counts, pops, ratios_subset)
-        except ValueError as e:
-            raise ValueError(f"Failed to redistribute overflow across buckets: {e}")
-        # Print final generated counts and their percentages
-        print("Final per-bucket counts after rebalancing:", final_bucket_counts)
-        total_final = sum(final_bucket_counts)
-        print("Final per-bucket percentages of train_total:")
-        for i, cnt in enumerate(final_bucket_counts):
-            pct = 100.0 * cnt / total_final if total_final else 0.0
-            print(f"  Bucket {i}: {cnt} ({pct:.2f}%)")
-    else:
-        print("No bucket overflow detected; using initial per-bucket allocation.")
-        print("Per-bucket counts:", initial_bucket_counts)
+    print("Generating multiplication dataset...")
+    print(f"  Train size: {train_size}")
+    print(f"  Validation size: {val_size}")
+    print(f"  Test size: {test_size}")
+    print(f"  Output directory: {out_path.resolve()}")
+    print(f"  Seed: {seed}")
+    print(f"  'a' digit lengths supported: {a_distribution.num_lengths} (1..{a_distribution.num_lengths})")
+    print(f"  'b' digit lengths supported: {b_distribution.num_lengths} (1..{b_distribution.num_lengths})")
 
-    # sanity: ensure requested per-bucket counts are available
-    for i_local, (req, p) in enumerate(zip(final_bucket_counts, pops)):
-        if req > p:
-            # show global bucket index for clarity
-            global_idx = i_local  # since we took prefix, local maps directly to global
-            raise ValueError(f"Train bucket {global_idx} requested {req} samples but only {p} available. "
-                             f"Reduce train_total or adjust distribution.")
+    train_counts_a, train_counts_b = _write_dataset(
+        out_path / "train.txt", train_size, rng, a_distribution, b_distribution
+    )
+    val_counts_a, val_counts_b = _write_dataset(
+        out_path / "val.txt", val_size, rng, a_distribution, b_distribution
+    )
+    test_counts_a, test_counts_b = _write_dataset(
+        out_path / "test.txt", test_size, rng, a_distribution, b_distribution
+    )
 
-    # print selection info
-    print("Selected ratios (first num_operands):", ratios_subset)
-    for i_local, (rng_range, pop) in enumerate(zip(ranges_subset, pops)):
-        a0, a1 = rng_range
-        print(f"Bucket {i_local} a-range {a0}-{a1-1}, population pairs: {pop}")
+    print("Finished writing datasets.")
+    print("  Train 'a' length distribution:", _format_length_counts(train_counts_a))
+    print("  Train 'b' length distribution:", _format_length_counts(train_counts_b))
+    print("  Val 'a' length distribution:", _format_length_counts(val_counts_a))
+    print("  Val 'b' length distribution:", _format_length_counts(val_counts_b))
+    print("  Test 'a' length distribution:", _format_length_counts(test_counts_a))
+    print("  Test 'b' length distribution:", _format_length_counts(test_counts_b))
 
-    # 1) Sample training pairs per selected bucket (disjoint by construction)
-    training_pairs: List[Tuple[int,int]] = []
-    training_global_indices: Set[int] = set()
 
-    for i_local, k in enumerate(final_bucket_counts):
-        if k == 0:
-            continue
-        # i_local corresponds to the global bucket index since we use a prefix
-        global_bucket_idx = i_local
-        pairs = sample_pairs_from_bucket(global_bucket_idx, k, rng)
-        for a, b in pairs:
-            idx = global_index(a, b)
-            training_pairs.append((a, b))
-            training_global_indices.add(idx)
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate multiplication data where operand digit lengths follow user-specified distributions. "
+            "Provide the distributions as comma-separated probability lists."
+        )
+    )
+    parser.add_argument("--train_size", type=int, default=DEFAULT_TRAIN_SIZE, help="Number of training examples.")
+    parser.add_argument("--val_size", type=int, default=DEFAULT_VAL_SIZE, help="Number of validation examples.")
+    parser.add_argument("--test_size", type=int, default=DEFAULT_TEST_SIZE, help="Number of test examples.")
+    parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Directory to write the dataset files.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed used for sampling.")
+    parser.add_argument(
+        "--a_length_probs",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated probabilities for the digit length of operand 'a'. "
+            "Index 0 corresponds to 1-digit numbers, index 1 to 2-digit numbers, and so on."
+        ),
+    )
+    parser.add_argument(
+        "--b_length_probs",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated probabilities for the digit length of operand 'b'. "
+            "Each position corresponds to the length starting at one digit."
+        ),
+    )
+    parser.add_argument(
+        "--max_digits",
+        type=int,
+        default=None,
+        help=(
+            "Positive integer specifying the largest digit length to sample. "
+            "If provided without --a_length_probs/--b_length_probs, generates default distributions "
+            "proportional to the digit length (1, 2, ..., max_digits)."
+        ),
+    )
+    # Accept --num_operands for compatibility with the dispatcher script.  The flag is ignored.
+    parser.add_argument(
+        "--num_operands",
+        type=int,
+        default=None,
+        help="Unused legacy flag accepted for compatibility with data_generate.py.",
+    )
+    return parser
 
-    # shuffle training
-    rng.shuffle(training_pairs)
 
-    # 2) Sample testing set and validation set uniformly from selected a-range x {0..9}.
-    #    Sampling is WITH REPLACEMENT and NOT required to be disjoint from training.
-    #    If num_operands = N, max_a is ranges_subset[-1][1] - 1 (inclusive).
-    max_a_inclusive = ranges_subset[-1][1] - 1
+def parse_args() -> argparse.Namespace:
+    parser = _build_arg_parser()
+    args = parser.parse_args()
 
-    def sample_uniform_pairs(k: int, max_a_incl: int, rng: random.Random) -> List[Tuple[int,int]]:
-        if k <= 0:
-            return []
-        pairs: List[Tuple[int,int]] = []
-        for _ in range(k):
-            a = rng.randint(0, max_a_incl)
-            b = rng.randint(0, 9)
-            pairs.append((a, b))
-        return pairs
+    try:
+        a_probs = (
+            _parse_probability_string(args.a_length_probs, flag_name="--a_length_probs")
+            if args.a_length_probs is not None
+            else None
+        )
+        b_probs = (
+            _parse_probability_string(args.b_length_probs, flag_name="--b_length_probs")
+            if args.b_length_probs is not None
+            else None
+        )
+    except ProbabilityParseError as exc:
+        parser.error(str(exc))
 
-    testing_pairs = sample_uniform_pairs(test_size, max_a_inclusive, rng)
-    validation_pairs = sample_uniform_pairs(validation_size, max_a_inclusive, rng)
+    setattr(args, "a_probabilities", a_probs)
+    setattr(args, "b_probabilities", b_probs)
+    return args
 
-    # shuffle testing & validation (optional, but keep behavior similar)
-    rng.shuffle(testing_pairs)
-    rng.shuffle(validation_pairs)
 
-    # 3) Write out files
-    train_path = OUT_DIR / "train.txt"
-    test_path  = OUT_DIR / "test.txt"
-    val_path   = OUT_DIR / "val.txt"
+def main() -> None:
+    args = parse_args()
+    try:
+        make_dataset(
+            train_size=args.train_size,
+            val_size=args.val_size,
+            test_size=args.test_size,
+            output_dir=args.output_dir,
+            seed=args.seed,
+            a_probabilities=args.a_probabilities,
+            b_probabilities=args.b_probabilities,
+            max_digits=args.max_digits,
+        )
+    except ProbabilityParseError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    with train_path.open("w") as f_tr:
-        for a, b in training_pairs:
-            f_tr.write(f"{a}*{b}={a*b}$\n")
-
-    with test_path.open("w") as f_te:
-        # tests: no answers (kept consistent with original code comment)
-        for a, b in testing_pairs:
-            f_te.write(f"{a}*{b}={a*b}$\n")
-
-    with val_path.open("w") as f_val:
-        for a, b in validation_pairs:
-            f_val.write(f"{a}*{b}={a*b}$\n")
-
-    print(f"Wrote {len(training_pairs)} shuffled lines (with answers) to '{train_path}'")
-    print(f"Wrote {len(testing_pairs)} shuffled lines (no answers) to '{test_path}'")
-    print(f"Wrote {len(validation_pairs)} shuffled lines (with answers) to '{val_path}'")
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Generate balanced multiplication dataset (a * b).")
-    p.add_argument("--train_size", type=int, default=DEFAULT_TRAIN_SIZE,
-                   help="Total number of training examples (will be split across digit-buckets by ratio).")
-    p.add_argument("--test_size", type=int, default=DEFAULT_TEST_SIZE, help="Number of test examples (no answers).")
-    p.add_argument("--val_size", type=int, default=DEFAULT_VAL_SIZE, help="Number of validation examples (with answers).")
-    p.add_argument("--output_dir", type=str, default=DEFAULT_OUT_DIR, help="Directory to write train.txt, test.txt, val.txt")
-    p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed")
-    p.add_argument("--num_operands", type=int, default=DEFAULT_NUM_OPERANDS,
-                   help="Number of operand-digit-buckets to use (prefix of [100,200,400,800,1500,7000]). Range 1..6.")
-    return p.parse_args()
 
 if __name__ == "__main__":
-    args = parse_args()
-    make_dataset(train_total=args.train_size, test_size=args.test_size,
-                 validation_size=args.val_size, out_dir=args.output_dir,
-                 seed=args.seed, num_operands=args.num_operands)
+    main()
