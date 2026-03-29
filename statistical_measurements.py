@@ -1002,3 +1002,199 @@ def calc_model_dataset_mi(model, metadata, data, digits_per_num=3, batch_size=12
             res2["normalized_mutual_info"][j1, j2] = float(mi/E_y)
 
     return {"input-output":res1, "output-output":res2}
+
+
+#############################################################################
+# Multiplication MI helpers (a*b=c)
+
+def _clean_expr_line(line: str) -> str:
+    """Normalize a raw line from dataset files to an expression string."""
+    return str(line).strip()
+
+
+def _parse_mul_expression(line: str) -> dict:
+    """Parse one multiplication expression in the form ``a*b=c$``."""
+    expr = _clean_expr_line(line)
+    if not expr:
+        raise ValueError("Encountered an empty multiplication expression line.")
+
+    if expr.endswith("$"):
+        expr_wo_eos = expr[:-1]
+    else:
+        expr_wo_eos = expr
+
+    if "=" not in expr_wo_eos:
+        raise ValueError(f"Expression missing '=': {expr!r}")
+    lhs, rhs = expr_wo_eos.split("=", maxsplit=1)
+    if "*" not in lhs:
+        raise ValueError(f"Expression missing '*': {expr!r}")
+
+    a_str, b_str = lhs.split("*", maxsplit=1)
+    a_str = a_str.strip()
+    b_str = b_str.strip()
+    c_str = rhs.strip()
+    if not (a_str.isdigit() and b_str.isdigit() and c_str.isdigit()):
+        raise ValueError(f"Non-digit operand/result encountered in {expr!r}")
+
+    if len(b_str) != 1:
+        raise ValueError(
+            f"Expected single-digit multiplier b for simple multiplication, got {b_str!r} in {expr!r}"
+        )
+
+    # Character offsets in the cleaned line (with trailing '$' if present).
+    a_start = expr.find(a_str)
+    b_start = expr.find(b_str, a_start + len(a_str) + 1)
+    eq_idx = expr.find("=")
+    c_start = eq_idx + 1
+
+    return {
+        "expr": expr,
+        "a_str": a_str,
+        "b_str": b_str,
+        "c_str": c_str,
+        "a_start": a_start,
+        "b_start": b_start,
+        "c_start": c_start,
+    }
+
+
+def _compute_mul_carry_chain(a_str: str, b_digit: int) -> List[int]:
+    """Compute carry-out for each place in ``a * b_digit`` from unit upwards."""
+    carries_out: List[int] = []
+    carry_in = 0
+    a_digits_rev = [int(ch) for ch in reversed(a_str)]
+    for a_k in a_digits_rev:
+        tmp = a_k * b_digit + carry_in
+        carry_out = tmp // 10
+        carries_out.append(carry_out)
+        carry_in = carry_out
+    return carries_out
+
+
+def _carry_to_next_place(a_str: str, b_digit: int, place_offset: int) -> int:
+    """Return carry generated at place ``place_offset`` (to the next place)."""
+    if place_offset < 0:
+        raise ValueError("place_offset must be non-negative.")
+    chain = _compute_mul_carry_chain(a_str, b_digit)
+    if place_offset >= len(chain):
+        return 0
+    return chain[place_offset]
+
+
+def new_find_indices_mul(
+    lines: Iterable[str],
+    x_place: Union[str, int],
+    y_place: Union[str, int],
+    z_place: Union[str, int] = "unit",
+    carry_place: Optional[Union[str, int]] = None,
+    reverse: bool = False,
+):
+    """Locate X/Y/Z token indices for multiplication expressions ``a*b=c``."""
+    x_offset = _place_to_offset(x_place)
+    y_offset = _place_to_offset(y_place)
+    z_offset = _place_to_offset(z_place)
+    carry_offset = _place_to_offset(carry_place)
+
+    x_indices: List[Optional[int]] = []
+    y_indices: List[Optional[int]] = []
+    z_indices: List[Optional[int]] = []
+    carry_places: List[Optional[int]] = [] if carry_offset is not None else None
+
+    for line in lines:
+        parsed = _parse_mul_expression(line)
+        x_indices.append(_digit_index(parsed["a_start"], parsed["a_str"], x_offset, False))
+        y_indices.append(_digit_index(parsed["c_start"], parsed["c_str"], y_offset, reverse))
+        z_indices.append(_digit_index(parsed["c_start"], parsed["c_str"], z_offset, reverse))
+        if carry_places is not None:
+            carry_places.append(carry_offset)
+
+    if carry_places is not None:
+        return x_indices, y_indices, z_indices, carry_places
+    return x_indices, y_indices, z_indices
+
+
+def find_xyz_dataset_mi_mul(meta, lines, reverse=False, digit_places_list=None):
+    """Compute dataset MI/CMI statistics for simple multiplication ``a*b=c``."""
+    if digit_places_list is None:
+        digit_places_list = [("units", "units", "tens", "units")]
+
+    cleaned_lines = [_clean_expr_line(line) for line in lines]
+    N = len(cleaned_lines)
+    xyz_mi_list = []
+
+    for places in digit_places_list:
+        x_indices, y_indices, z_indices, carry_places = new_find_indices_mul(
+            cleaned_lines,
+            places[0],
+            places[1],
+            places[2],
+            carry_place=places[3],
+            reverse=reverse,
+        )
+
+        x = torch.empty(N, dtype=torch.long)
+        y = torch.empty(N, dtype=torch.long)
+        z = torch.empty(N, dtype=torch.long)
+        carries = torch.zeros(N, dtype=torch.long)
+        y_indices_cleaned = []
+
+        for j in range(N):
+            line = cleaned_lines[j]
+            parsed = _parse_mul_expression(line)
+
+            x[j] = meta["stoi"][line[x_indices[j]]] if not np.isnan(x_indices[j]) else meta["stoi"]["0"]
+            y[j] = meta["stoi"][line[y_indices[j]]] if not np.isnan(y_indices[j]) else meta["stoi"]["$"]
+            z[j] = meta["stoi"][line[z_indices[j]]] if not np.isnan(z_indices[j]) else meta["stoi"]["$"]
+
+            carry_offset = carry_places[j]
+            carries[j] = _carry_to_next_place(parsed["a_str"], int(parsed["b_str"]), carry_offset)
+
+            tmp = y_indices[j] if not np.isnan(y_indices[j]) else len(line) - 1
+            y_indices_cleaned.append(tmp)
+
+        o0 = calc_mi_x_y(x, y)
+        o2 = calc_mi_x_y_z(x, y, z)
+        o4 = calc_mi_x_y_z(x, y, carries)
+        mi = [[o["mutual_info"], o["normalized_mutual_info"]] for o in [o0, o2, o4]]
+        xyz_mi = {
+            "x": x,
+            "y": y,
+            "z": z,
+            "carries": carries,
+            "places": places,
+            "y_indices_cleaned": y_indices_cleaned,
+            "mi": mi,
+        }
+        xyz_mi_list.append(xyz_mi)
+
+    return xyz_mi_list
+
+
+def calc_model_dataset_mi_mul(
+    model,
+    meta,
+    lines,
+    xyz_mi_list,
+    reverse=False,
+    batch_size=128,
+    padding_token=0,
+):
+    """Estimate model-based MI/CMI statistics for multiplication datasets."""
+    _ = reverse  # kept for API parity with addition function
+    cleaned_lines = [_clean_expr_line(line) for line in lines]
+    mi_list = []
+    for xyz_mi in xyz_mi_list:
+        probs = get_token_probabilities_at_indices(
+            model,
+            meta,
+            cleaned_lines,
+            xyz_mi["y_indices_cleaned"],
+            batch_size=batch_size,
+            padding_token=padding_token,
+        )
+        o1 = calc_mi_x_p(xyz_mi["x"], probs)
+        o3 = calc_mi_x_p_z(xyz_mi["x"], probs, xyz_mi["z"])
+        o5 = calc_mi_x_p_z(xyz_mi["x"], probs, xyz_mi["carries"])
+        mi = [[o["mutual_info"], o["normalized_mutual_info"]] for o in [o1, o3, o5]]
+        mi_list.append(mi)
+    return mi_list
