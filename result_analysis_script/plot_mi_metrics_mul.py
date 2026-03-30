@@ -161,7 +161,7 @@ def plot_two_panel(df, x, places, mode, out_path, max_x):
     ax_top.tick_params(axis="both", which="major", labelsize=TICK_FONTSIZE)
     ax_bottom.tick_params(axis="both", which="major", labelsize=TICK_FONTSIZE)
 
-    title = "MI conditioned on z" if mode == "z" else "MI conditioned on carries"
+    title = "MI conditioned on z (p0 = units place)" if mode == "z" else "MI conditioned on carries (p0 = units place)"
     fig.suptitle(title, fontsize=LABEL_FONTSIZE + 1)
     fig.subplots_adjust(bottom=0.09, top=0.91, hspace=0.12)
     fig.savefig(str(out_path), **SAVE_KW)
