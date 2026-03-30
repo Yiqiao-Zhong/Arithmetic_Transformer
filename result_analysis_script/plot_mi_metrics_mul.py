@@ -149,7 +149,13 @@ def plot_two_panel(df, x, places, mode, out_path, max_x):
     ax_bottom.set_ylabel("Train loss", fontsize=LABEL_FONTSIZE)
     ax_bottom.set_xlabel("Training steps", fontsize=LABEL_FONTSIZE)
     ax_bottom.grid(**HGRID_KW)
-    ax_bottom.set_xlim(0, max_x)
+    x_max_data = float(np.nanmax(x)) if len(x) > 0 else 0.0
+    x_upper = max_x if max_x is not None else x_max_data
+    if x_max_data > 0:
+        x_upper = min(float(x_upper), x_max_data)
+    if x_upper <= 0:
+        x_upper = max_x if max_x is not None else 1.0
+    ax_bottom.set_xlim(0, x_upper)
     ax_bottom.xaxis.set_major_formatter(FuncFormatter(k_formatter))
 
     ax_top.tick_params(axis="both", which="major", labelsize=TICK_FONTSIZE)
