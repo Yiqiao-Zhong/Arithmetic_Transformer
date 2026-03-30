@@ -139,6 +139,7 @@ early_eval_border2 = 500
 
 # additional statistical measurements
 mi_measurement = True # whether to do mutual information measurement
+mi_measurement_mul = False # whether to do multiplication mutual information measurement
 early_mi_measure_border = 20000 # border for early mutual information measurement
 early_mi_measure_interval = 1000 # interval for early mutual information measurement
 final_mi_measure_interval = 5000 # interval for final mutual information measurement
@@ -255,7 +256,7 @@ train_data_path = os.path.join(data_dir, train_data_name)
 train_data_test_path = os.path.join(data_dir, train_data_test_name) if eval_addition_train else None
 val_data_path = os.path.join(data_dir, val_data_name)
 test_file_path = os.path.join(data_dir, test_file_name)
-stats_measurement_data_file_path = os.path.join(data_dir, stats_measurement_data_name) if mi_measurement else None
+stats_measurement_data_file_path = os.path.join(data_dir, stats_measurement_data_name) if (mi_measurement or mi_measurement_mul) else None
 
 
 # Apply normalization to the known path variables (if they exist in globals)
@@ -840,6 +841,46 @@ if mi_measurement:
     reverse = 'reverse' in out_dir
     mi_lines = gen_stats_test(num_operands, reverse=reverse)
     xyz_mi_list = find_xyz_dataset_mi(meta, mi_lines, digit_places_list=DIGIT_PLACES_LIST, reverse=reverse)
+
+if mi_measurement_mul:
+    reverse_mul = ('reverse' in out_dir) or (str(data_format).lower() in ['reverse', 'reversed'])
+    max_mul_place = int(num_digit)
+    DIGIT_PLACES_LIST_MUL = []
+    for place_offset in range(max_mul_place + 1):
+        z_offset = min(place_offset + 1, max_mul_place)
+        DIGIT_PLACES_LIST_MUL.append((place_offset, place_offset, z_offset, place_offset))
+
+    # For multiplication MI, always source lines from task test files rather than
+    # stats_measurement_data_file_path (which is addition-oriented by default).
+    main_test_path = None
+    preferred_stems = [main_test_name]
+    if reverse_mul:
+        preferred_stems += ["test_reverse", "test-reverse", "test_rev"]
+    else:
+        preferred_stems += ["test"]
+
+    for stem in preferred_stems:
+        for candidate in test_files:
+            if _Path(candidate).stem == stem:
+                main_test_path = candidate
+                break
+        if main_test_path is not None:
+            break
+
+    if main_test_path is None and len(test_files) > 0:
+        main_test_path = test_files[0]
+    if main_test_path is None:
+        raise ValueError("Unable to locate a test file for multiplication MI measurement.")
+
+    with open(main_test_path, "r", encoding="utf-8") as f:
+        mi_lines_mul = [line.strip() for line in f if line.strip()]
+
+    xyz_mi_list_mul = find_xyz_dataset_mi_mul(
+        meta,
+        mi_lines_mul,
+        digit_places_list=DIGIT_PLACES_LIST_MUL,
+        reverse=reverse_mul,
+    )
 #### End of ADDED
 
 # Training loop - iteration based
@@ -1032,6 +1073,57 @@ while iter_num < max_iters:
                     # ensure result_dir exists
                     os.makedirs(os.path.dirname(mi_csv_path), exist_ok=True)
                     df_row.to_csv(mi_csv_path, mode='a', header=header, index=False)
+
+            if mi_measurement_mul and operator == '*' and batch_method == 'per_example':
+                if iter_num == 0:
+                    mi_record_dict_mul = {}
+                model.eval()
+                with torch.no_grad():
+                    mi_stats_mul = calc_model_dataset_mi_mul(
+                        model=model,
+                        meta=meta,
+                        lines=mi_lines_mul,
+                        xyz_mi_list=xyz_mi_list_mul,
+                        reverse=reverse_mul,
+                        batch_size=test_batch_size,
+                        padding_token=train_dataset.pad_id,
+                    )
+                mi_record_dict_mul[f"iter_{iter_num}"] = mi_stats_mul
+
+                # Log dynamic place-wise MI metrics for multiplication.
+                for place_id, place_tuple in enumerate(DIGIT_PLACES_LIST_MUL):
+                    place_name = f"p{int(place_tuple[0])}"
+                    wandb_dict[f"mi_mul/{place_name}-z"] = mi_stats_mul[place_id][1][0]
+                    wandb_dict[f"mi_mul/{place_name}-carries"] = mi_stats_mul[place_id][2][0]
+                    wandb_dict[f"mi_mul/{place_name}-z-base"] = xyz_mi_list_mul[place_id]["mi"][1][0]
+                    wandb_dict[f"mi_mul/{place_name}-carries-base"] = xyz_mi_list_mul[place_id]["mi"][2][0]
+
+                model.train()
+
+                if master_process:
+                    mi_mul_csv_path = os.path.join(result_dir, 'mi_metrics_mul.csv')
+                    mi_mul_columns = ['iter', 'train_loss']
+                    for place_tuple in DIGIT_PLACES_LIST_MUL:
+                        place_name = f"p{int(place_tuple[0])}"
+                        mi_mul_columns.extend([
+                            f"mi_mul/{place_name}-z-base",
+                            f"mi_mul/{place_name}-z",
+                            f"mi_mul/{place_name}-carries-base",
+                            f"mi_mul/{place_name}-carries",
+                        ])
+
+                    row_mul = {c: None for c in mi_mul_columns}
+                    row_mul['iter'] = iter_num
+                    row_mul['train_loss'] = losses['train'].item() if 'losses' in locals() else wandb_dict.get("train/loss", None)
+                    for k in mi_mul_columns:
+                        if k in ('iter', 'train_loss'):
+                            continue
+                        row_mul[k] = wandb_dict.get(k, None)
+
+                    df_row_mul = pd.DataFrame([row_mul])
+                    header_mul = not os.path.exists(mi_mul_csv_path)
+                    os.makedirs(os.path.dirname(mi_mul_csv_path), exist_ok=True)
+                    df_row_mul.to_csv(mi_mul_csv_path, mode='a', header=header_mul, index=False)
             #### End of ADDED
       
         # Update and save basic metrics
